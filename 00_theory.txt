@@ -1,0 +1,165 @@
+What is a Redis -> It stands for Remote Dictionary Service
+Redis is an example of server/client system. Multiple clients can connect to a single server, and
+the server recieves requests from TCP connections and send responses back.
+
+
+Intro to Socket Programming
+There are several Linux system calls we need to learn before we can start Socket Programming
+Some of which are
+    1. socket() -> returns an fd.
+            An fd is an integer that refers to something in the linux kernel, like a TCP connection, a disk file
+            a listening port or some other resource.
+
+            It stands for File Descriptor and is a integer that an OS uses to identify an open resource
+
+    2. bind() -> assigns a local address to a socket which translates to "this socket should listen to this IP and port"
+    3. listen() -> it enables us to accept connections to that address, in other words its like "this socket is going to be
+                    a server socket, start accepting incoming tcp connection requests from it".
+    4. accept() -> accept is where the server actually takes an incoming connection, after listen you put your server into
+                    listening mode, after that the clients can accept to connect.
+                    In layman terms, "Take the pending client connection and give me a socket I can use to communicate
+                    with the client".
+
+
+                    accept() always returns a new fd
+                    lets say you have your server_fd listening incoming requests, when server_fd accepts, it creates a
+                    new fd, which lets call client_fd and when the connection is established, this fd can communicate with
+                    that specific client. As more clients keep coming and as more client_fds start to connect... it looks
+                    something like this...
+
+                    server_fd
+                    ├──→ client_fd_1 → Client A
+                    ├──→ client_fd_2 → Client B
+                    └──→ client_fd_3 → Client C
+
+
+    The entire workflow looks something like this...
+        socket() -> establishes connection
+          |
+        bind() -> assigns ip/port
+          |
+        listen() -> start to listen for incoming requests
+          |
+        accept() -> accepts the requests, creating new fds and connections between the server and each client
+
+
+    // Pseudo Code for server side
+        fd = socket()
+        bind(fd, address)
+        listen(fd)
+        while true
+            conn_fd = accept(fd)
+            perform_action(conn_fd)
+            close(conn_fd)
+
+
+    5. read() -> recieves data from the TCP connection, return an int value, if that value < 0 it means error,
+                  if value == 0 means the connection has been closed, if value > 0 indicates some amount of data recieved
+    6. write() -> sends data over the TCP connection
+    7. close() -> destroys the resources referred by the fd and recycles the fd number
+
+
+    8. connect() -> is a client side syscall that takes a socket fd and makes a TCP connection to that address
+
+    // Pseudo Code for client side
+        fd = socket()
+        connect(fd, address)
+        perform_action(fd)
+        close(fd)
+
+
+
+    AF_INET is for ipv4
+    AF_INET6 is for ipv6 or dual stack socket
+    SOCK_STREAM is for TCP
+
+
+SO_REUSEADDR -> it is a socket option that tells the OS "Allow this socket to use local address/port that is temporarily
+                associated with an older connection"
+
+            Lets say my redis server stops and then restarts immediately, TCP may keep the information about the 
+            server shutting down for longer than it takes for it to restart, as in by the time my server restarts
+            the TCP still holds the information that my server has been shut down, to prevent that we use SO_REUSEADDR
+            which tells the OS "I know this address was already used, let me bind to it again."
+
+
+--------------------------------------------------------------------------------
+
+PROTOCOL PARSING
+  We need to process multiple requests from a client, to do that we need a "protocol", to split the requests apart
+  from the TCP byte stream is one way. To do that we can do something like sending the length of one message before
+  the message so we can send multiple requests and successfully differentiate them as well.
+
+  |-----------|------|----------|-------|
+  |  length   | msg1 |  length  | msg2  |
+  |-----------|------|----------|-------|
+
+  lets say the length is a 4 byte little endian integer containing length of the successing message/request
+
+    one_request(connfd) -> this function only parses one request and replies to that, until an error occurs or
+                            when the connection is disrupted. Right now we are only handling one connection at
+                            once until we implement event loops later on.
+
+
+--------------------------------------------------------------------------------
+
+EVENT LOOP AND NON BLOCKING IO
+  right now what my server is doing is...
+          accept client
+              |
+          while(true)
+              |
+          read request
+              |
+          process request
+              |
+          write responses
+              |
+      continue reading next requests
+
+
+    the problem is that read and write can block each other. Imagine you have 3 clients connected, what my server does
+    right now is it accepts A, reads A but if A doesnt send anything, my server is stuck there infinitely, so it wont be
+    able to read B and C.
+
+    What i would wanna have with non-blocking IO is that after waiting for a set amount of time, the server should be able
+    to decide that it has to now move on to the next request/client.
+
+    What event loop does is that it tells the server to look for which sockets are ready to do something with, instead of
+    waiting for one infinitely.
+
+    So essentially, non blocking IO says "dont make me wait" and the event loop decides which sockets are worth trying for
+    IO at the given moment.
+
+
+    There are 3 ways to deal with concurrent connections in server-side network Programming
+    1. Forking - creating new process for each client 
+    2. Multi-Threading - uses threads instead of processes
+    3. Event Loops - uses polling and non blocking IO, usually runs on a single threads
+        We will be using event loops here
+
+
+    Instead of just doing things such as reading, writing or accepting with FDs, we use the poll operation to tell us
+    which FD can be operated immediately without blocking. When we perform an IO operation on an FD, the operation should
+    be performed in a nonblocking mode
+
+    The poll() function in LINUX is a system call that waits for the file Descriptor to be ready for IO. It does network
+    read or write data, it is only for checking the status of that certain FD
+
+
+    ------X-------
+
+    In blocking mode, read blocks the caller when there is no data in the kernel, write blocks when the write buffer
+    is full, and accept block fails when there arre no new connections in the kernel queue.
+
+    In non blocking mode, those operations either succeed without blocking or fail with errno EAGAIN which means "not ready"
+    Such operations must be retried after their readiness is notified by poll().
+
+    poll() is the sole blocking operation in an event loop, everything else must be non blocking thus a single thread
+    can handle multiple concurrent connections. IO APIs such as read, write and accept have non blocking modes. The APIs
+    which dont (such as gethostbyname and disk IOs) should be performed in thread pools (we will study what those are and
+    how theyre used in the later iterations of this project).
+
+    Timers must be implemented within the event loop since we cant sleep() waiting inside the event loop. 
+
+    THE SYSCALL FOR SETTING AN FD TO NONBLOCKING MODE IS FCNTL
